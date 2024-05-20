@@ -1,0 +1,109 @@
+package CustomBits where
+
+import Vector
+import BuildVector
+
+
+class MyBits a n | a -> n where
+  mypack   :: a -> Bit n
+  myunpack :: Bit n -> a
+
+-- Explicit instances for primitive types
+instance MyBits (Bit n) n where
+  mypack = id
+  myunpack = id
+
+-- Generic default instance
+instance (Generic a r, MyBits' r n) => MyBits a n where
+  mypack   x  = mypack' $ from x
+  myunpack bs = to $ myunpack' bs
+
+class MyBits' r n | r -> n where
+  mypack'   :: r -> Bit n
+  myunpack' :: Bit n -> r
+
+-- Instance for sum types
+instance (MyBits' r1 n1, MyBits' r2 n2, Max n1 n2 c, Add 1 c n, Add p1 n1 c, Add p2 n2 c) =>
+    MyBits' (Either r1 r2) n where
+  mypack' (Left x) = 1'b0 ++ extend (mypack' x)
+  mypack' (Right x) = 1'b1 ++ extend (mypack' x)
+  myunpack' bs =
+    let (tag, content) = (split bs) :: (Bit 1, Bit c)
+    in case tag of
+        0 -> Left $ myunpack' $ truncate content
+        1 -> Right $ myunpack' $ truncate content
+
+-- Instance for product types
+instance (MyBits' r1 n1, MyBits' r2 n2, Add n1 n2 n) => MyBits' (r1, r2) n where
+  mypack' (x, y) = mypack' x ++ mypack' y
+  myunpack' bs = let (bs1, bs2) = split bs
+                 in (myunpack' bs1, myunpack' bs2)
+
+instance  MyBits' () 0 where
+  mypack' () = 0'b0
+  myunpack' _ = ()
+
+instance (MyBits' a m, Bits (Vector n (Bit m)) l) => MyBits' (Vector n a) l where
+  mypack' v = pack $ map mypack' v
+  myunpack' = map myunpack' `compose` unpack
+
+-- Ignore all types of metadata
+instance (MyBits' r n) => MyBits' (Meta m r) n where
+  mypack' (Meta x) = mypack' x
+  myunpack' bs = Meta $ myunpack' bs
+
+-- Conc instance calls back to the non-generic MyBits class
+instance (MyBits a n) => MyBits' (Conc a) n where
+  mypack' (Conc x) = mypack x
+  myunpack' bs = Conc $ myunpack bs
+
+
+
+mkMyReg :: (IsModule m c, MyBits a n) => a -> m (Reg a)
+mkMyReg v = liftModule $
+  if valueOf n == 0 then
+    module
+      interface
+        _read = myunpack 0
+        _write _ = return ()
+  else
+    module
+      _r :: Reg (Bit n)
+      _r <- mkReg (mypack v)
+      interface
+        _read = myunpack _r
+        _write x = _r._write (mypack x)
+
+
+data Foo = A (UInt 8)
+         | B (UInt 16) Bool Bar
+         | C
+  deriving (FShow)
+
+struct Bar =
+  x :: (UInt 8)
+  y :: (UInt 8)
+ deriving (FShow)
+
+
+foo :: Vector 3 Foo
+foo = vec (A 5) (B 1223 True (Bar {x=42; y=54})) C
+
+fooPack :: Bit 105
+fooPack = mypack foo
+
+fooUnpack :: Vector 3 Foo
+fooUnpack = myunpack fooPack
+
+
+sysCustomBits :: Module Empty
+sysCustomBits = module
+  r <- mkMyReg foo
+
+  rules
+    when True ==> do
+      $display (fshow foo)
+      $display (fshow fooPack)
+      $display (fshow fooUnpack)
+      $display (fshow r)
+      $finish
